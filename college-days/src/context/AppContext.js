@@ -1,702 +1,327 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
-import { format, parseISO, differenceInDays, eachDayOfInterval, isSunday, isBefore, isToday } from 'date-fns';
+import { format, differenceInDays, eachDayOfInterval, isSunday, isBefore, isToday } from 'date-fns';
 import { auth, db } from '../firebase';
-import { 
-  doc, 
-  setDoc, 
-  getDoc, 
-  getDocs, 
-  collection, 
-  query, 
-  where, 
-  updateDoc, 
-  deleteDoc,
-  serverTimestamp,
-  Timestamp,
-  orderBy
+import {
+  doc, setDoc, getDoc, getDocs, collection, query,
+  where, updateDoc, deleteDoc, serverTimestamp, Timestamp, orderBy
 } from 'firebase/firestore';
-import { onAuthStateChanged, signOut, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 
-// Generate unique IDs
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2);
 
-// Helper function to convert Firestore Timestamp to Date
-const toDate = (dateValue) => {
-  if (!dateValue) return null;
-  
-  if (dateValue instanceof Timestamp) {
-    return dateValue.toDate();
-  }
-  
-  if (typeof dateValue === 'string') {
-    return new Date(dateValue);
-  }
-  
-  if (dateValue instanceof Date) {
-    return dateValue;
-  }
-  
-  return new Date(); // Fallback
+const toDate = (val) => {
+  if (!val) return null;
+  if (val instanceof Timestamp) return val.toDate();
+  if (typeof val === 'string') return new Date(val);
+  if (val instanceof Date) return val;
+  return new Date();
 };
 
-// Helper function to safely format dates
-const safeFormat = (date, formatStr) => {
+const safeFormat = (date, fmt) => {
   if (!date) return '';
-  
   try {
-    const dateObj = date instanceof Date ? date : new Date(date);
-    if (isNaN(dateObj.getTime())) {
-      console.error('Invalid date:', date);
-      return '';
-    }
-    return format(dateObj, formatStr);
-  } catch (err) {
-    console.error('Error formatting date:', err);
-    return '';
-  }
+    const d = date instanceof Date ? date : new Date(date);
+    if (isNaN(d.getTime())) return '';
+    return format(d, fmt);
+  } catch { return ''; }
+};
+
+const isSecondSaturday = (date) => {
+  if (date.getDay() !== 6) return false;
+  const day = date.getDate();
+  return day >= 8 && day <= 14;
+};
+
+const getInitialTheme = () => {
+  try { return localStorage.getItem('semestertrack-theme') || 'light'; }
+  catch { return 'light'; }
 };
 
 const AppContext = createContext();
 
 const initialState = {
-  user: null,
-  semesters: [],
-  currentSemester: null,
-  days: [],
-  loading: true,
-  authInitialized: false
+  user: null, semesters: [], currentSemester: null, days: [],
+  loading: true, authInitialized: false, theme: getInitialTheme()
 };
 
 const appReducer = (state, action) => {
   switch (action.type) {
-    case 'SET_USER':
-      return { ...state, user: action.payload, loading: false, authInitialized: true };
-    case 'LOGOUT':
-      return { ...initialState, loading: false, authInitialized: true };
-    case 'LOAD_DATA':
-      return { 
-        ...state, 
-        semesters: action.payload.semesters || [],
-        days: action.payload.days || [],
-        currentSemester: action.payload.currentSemester || null,
-        loading: false
-      };
-    case 'ADD_SEMESTER':
-      return { 
-        ...state, 
-        semesters: [...state.semesters, action.payload],
-        currentSemester: action.payload
-      };
-    case 'UPDATE_SEMESTER':
-      return { 
-        ...state, 
-        semesters: state.semesters.map(semester => 
-          semester.id === action.payload.id ? action.payload : semester
-        ),
-        currentSemester: state.currentSemester?.id === action.payload.id ? action.payload : state.currentSemester
-      };
+    case 'SET_USER': return { ...state, user: action.payload, authInitialized: true };
+    case 'LOGOUT': return { ...initialState, loading: false, authInitialized: true, theme: state.theme };
+    case 'LOAD_DATA': return { ...state, semesters: action.payload.semesters || [], days: action.payload.days || [], currentSemester: action.payload.currentSemester || null, loading: false };
+    case 'SET_THEME': return { ...state, theme: action.payload };
+    case 'ADD_SEMESTER': return { ...state, semesters: [...state.semesters, action.payload], currentSemester: action.payload };
+    case 'UPDATE_SEMESTER': return { ...state, semesters: state.semesters.map(s => s.id === action.payload.id ? action.payload : s), currentSemester: state.currentSemester?.id === action.payload.id ? action.payload : state.currentSemester };
     case 'DELETE_SEMESTER':
-      const updatedSemesters = state.semesters.filter(semester => semester.id !== action.payload);
-      return { 
-        ...state, 
-        semesters: updatedSemesters,
-        currentSemester: state.currentSemester?.id === action.payload ? 
-          (updatedSemesters.length > 0 ? updatedSemesters[0] : null) : state.currentSemester
-      };
-    case 'REORDER_SEMESTERS':
-      return { 
-        ...state, 
-        semesters: action.payload
-      };
-    case 'SET_CURRENT_SEMESTER':
-      return { 
-        ...state, 
-        currentSemester: action.payload
-      };
-    case 'ADD_DAY':
-      return { 
-        ...state, 
-        days: [...state.days, action.payload]
-      };
-    case 'UPDATE_DAY':
-      return { 
-        ...state, 
-        days: state.days.map(day => 
-          day.id === action.payload.id ? action.payload : day
-        )
-      };
-    case 'SET_AUTH_INITIALIZED':
-      return { ...state, authInitialized: true };
-    default:
-      return state;
+      const upd = state.semesters.filter(s => s.id !== action.payload);
+      return { ...state, semesters: upd, currentSemester: state.currentSemester?.id === action.payload ? (upd[0] || null) : state.currentSemester };
+    case 'REORDER_SEMESTERS': return { ...state, semesters: action.payload };
+    case 'SET_CURRENT_SEMESTER': return { ...state, currentSemester: action.payload };
+    case 'ADD_DAY': return { ...state, days: [...state.days, action.payload] };
+    case 'UPDATE_DAY': return { ...state, days: state.days.map(d => d.id === action.payload.id ? action.payload : d) };
+    default: return state;
   }
 };
 
 export const AppProvider = ({ children }) => {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
-  // Check for authenticated user on initial render
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        console.log("Auth state changed. User is authenticated:", firebaseUser.uid);
-        
+    document.documentElement.setAttribute('data-theme', state.theme);
+    try { localStorage.setItem('semestertrack-theme', state.theme); } catch {}
+  }, [state.theme]);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (fu) => {
+      if (fu) {
         try {
-          // Check if user exists in Firestore
-          const userRef = doc(db, 'users', firebaseUser.uid);
-          const userDoc = await getDoc(userRef);
-          
-          let userData;
-          if (userDoc.exists()) {
-            userData = userDoc.data();
-            
-            // Check if photo URL has changed in Firebase auth
-            if (firebaseUser.photoURL && firebaseUser.photoURL !== userData.photoURL) {
-              // Update the photo URL in Firestore
-              await updateDoc(userRef, { photoURL: firebaseUser.photoURL });
-              userData.photoURL = firebaseUser.photoURL;
+          const ref = doc(db, 'users', fu.uid);
+          const snap = await getDoc(ref);
+          let ud;
+          if (snap.exists()) {
+            ud = snap.data();
+            if (fu.photoURL && fu.photoURL !== ud.photoURL) {
+              await updateDoc(ref, { photoURL: fu.photoURL });
+              ud.photoURL = fu.photoURL;
             }
           } else {
-            // Create new user document
-            userData = {
-              id: firebaseUser.uid,
-              name: firebaseUser.displayName || firebaseUser.email.split('@')[0],
-              email: firebaseUser.email,
-              photoURL: firebaseUser.photoURL || '',
-              createdAt: serverTimestamp()
-            };
-            await setDoc(userRef, userData);
+            ud = { id: fu.uid, name: fu.displayName || fu.email.split('@')[0], email: fu.email, photoURL: fu.photoURL || '', theme: 'light', createdAt: serverTimestamp() };
+            await setDoc(ref, ud);
           }
-          
-          // Set user in context
-          dispatch({ type: 'SET_USER', payload: userData });
-          
-          // Load user's semesters and days
-          await loadUserData(firebaseUser.uid);
-        } catch (error) {
-          console.error("Error in auth state change:", error);
-          // Even if there's an error, set the basic user info
-          const basicUserData = {
-            id: firebaseUser.uid,
-            name: firebaseUser.displayName || firebaseUser.email.split('@')[0],
-            email: firebaseUser.email,
-            photoURL: firebaseUser.photoURL || ''
-          };
-          dispatch({ type: 'SET_USER', payload: basicUserData });
+          ud.id = fu.uid;
+          dispatch({ type: 'SET_USER', payload: ud });
+          dispatch({ type: 'SET_THEME', payload: ud.theme || 'light' });
+          await loadUserData(fu.uid);
+        } catch (e) {
+          console.error('Auth error:', e);
+          dispatch({ type: 'SET_USER', payload: { id: fu.uid, name: fu.displayName || fu.email.split('@')[0], email: fu.email, photoURL: fu.photoURL || '' } });
+          dispatch({ type: 'LOAD_DATA', payload: {} });
         }
-      } else {
-        // User is logged out
-        console.log("Auth state changed. User is not authenticated");
-        dispatch({ type: 'LOGOUT' });
-      }
-      
-      // Mark auth as initialized
-      dispatch({ type: 'SET_AUTH_INITIALIZED' });
+      } else { dispatch({ type: 'LOGOUT' }); }
     });
-
-    return () => unsubscribe();
+    return () => unsub();
   }, []);
 
-  // Load user data from Firestore
   const loadUserData = async (userId) => {
     try {
-      console.log("Loading user data for:", userId);
-      
-      // Load semesters - try with orderBy first, fallback to simple query if index not created yet
       let semesters = [];
       try {
-        const semestersQuery = query(
-          collection(db, 'semesters'), 
-          where('userId', '==', userId),
-          orderBy('order', 'asc')
-        );
-        const semestersSnapshot = await getDocs(semestersQuery);
-        semesters = semestersSnapshot.docs.map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            ...data,
-            startDate: toDate(data.startDate),
-            endDate: toDate(data.endDate)
-          };
-        });
-      } catch (error) {
-        console.warn("Index not created yet, loading semesters without ordering:", error.message);
-        // Fallback to simple query without orderBy
-        const semestersQuery = query(
-          collection(db, 'semesters'), 
-          where('userId', '==', userId)
-        );
-        const semestersSnapshot = await getDocs(semestersQuery);
-        semesters = semestersSnapshot.docs.map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            ...data,
-            startDate: toDate(data.startDate),
-            endDate: toDate(data.endDate)
-          };
-        });
-        // Sort semesters by order field in JavaScript
+        const q = query(collection(db, 'semesters'), where('userId', '==', userId), orderBy('order', 'asc'));
+        const s = await getDocs(q);
+        semesters = s.docs.map(d => ({ id: d.id, ...d.data(), startDate: toDate(d.data().startDate), endDate: toDate(d.data().endDate) }));
+      } catch {
+        const q = query(collection(db, 'semesters'), where('userId', '==', userId));
+        const s = await getDocs(q);
+        semesters = s.docs.map(d => ({ id: d.id, ...d.data(), startDate: toDate(d.data().startDate), endDate: toDate(d.data().endDate) }));
         semesters.sort((a, b) => (a.order || 0) - (b.order || 0));
       }
-      
-      console.log("Loaded semesters:", semesters);
-      
-      // Load days
-      const daysQuery = query(collection(db, 'days'), where('userId', '==', userId));
-      const daysSnapshot = await getDocs(daysQuery);
-      const days = daysSnapshot.docs.map(doc => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          ...data,
-          date: toDate(data.date)
-        };
-      });
-      
-      console.log("Loaded days:", days.length);
-      
-      // Set first semester as current if none is selected
-      let currentSemester = null;
-      if (semesters.length > 0) {
-        currentSemester = semesters[0];
-      }
-      
-      dispatch({ 
-        type: 'LOAD_DATA', 
-        payload: {
-          semesters,
-          days,
-          currentSemester
-        }
-      });
-    } catch (err) {
-      console.error('Error loading user data:', err);
+      const dq = query(collection(db, 'days'), where('userId', '==', userId));
+      const ds = await getDocs(dq);
+      const days = ds.docs.map(d => ({ id: d.id, ...d.data(), date: toDate(d.data().date) }));
+      dispatch({ type: 'LOAD_DATA', payload: { semesters, days, currentSemester: semesters[0] || null } });
+    } catch (e) {
+      console.error('Load error:', e);
       dispatch({ type: 'LOAD_DATA', payload: {} });
     }
   };
 
-  // Authentication functions
-  const login = async (email, password, userData = null) => {
-    try {
-      // For Google sign-in, userData is provided
-      if (userData) {
-        console.log("Logging in with user data:", userData);
-        
-        // Ensure user data has all required fields
-        const completeUserData = {
-          id: userData.id,
-          name: userData.name || email.split('@')[0],
-          email: userData.email || email,
-          photoURL: userData.photoURL || ''
-        };
-        
-        dispatch({ type: 'SET_USER', payload: completeUserData });
-        await loadUserData(completeUserData.id);
-        return { success: true };
-      }
-      
-      // For email/password login (simplified for demo)
-      // In a real app, you would use Firebase Auth for email/password
-      const user = { 
-        id: generateId(), 
-        name: email.split('@')[0], 
-        email
-      };
-      dispatch({ type: 'SET_USER', payload: user });
-      return { success: true };
-    } catch (err) {
-      console.error('Login error:', err);
-      return { success: false, error: err.message };
-    }
+  const toggleTheme = async () => {
+    const t = state.theme === 'light' ? 'dark' : 'light';
+    dispatch({ type: 'SET_THEME', payload: t });
+    if (state.user?.id) try { await updateDoc(doc(db, 'users', state.user.id), { theme: t }); } catch {}
   };
 
-  const register = async (name, email, password) => {
-    try {
-      // In a real app, you would use Firebase Auth for registration
-      const user = { id: generateId(), name, email };
-      dispatch({ type: 'SET_USER', payload: user });
-      return { success: true };
-    } catch (err) {
-      console.error('Registration error:', err);
-      return { success: false, error: err.message };
-    }
+  const login = async () => ({ success: true });
+  const register = async () => ({ success: true });
+  const logout = async () => { try { await signOut(auth); dispatch({ type: 'LOGOUT' }); } catch {} };
+
+  const addSemester = async (sem) => {
+    if (!state.user?.id) throw new Error('Not authenticated');
+    if (!sem?.name || !sem?.startDate || !sem?.endDate) throw new Error('All fields required');
+    let sd = sem.startDate instanceof Date ? sem.startDate : new Date(sem.startDate);
+    let ed = sem.endDate instanceof Date ? sem.endDate : new Date(sem.endDate);
+    if (isNaN(sd.getTime()) || isNaN(ed.getTime())) throw new Error('Invalid dates');
+    if (sd >= ed) throw new Error('End date must be after start date');
+    if (state.semesters.find(s => s.name.toLowerCase() === sem.name.toLowerCase())) throw new Error('Name already exists');
+    const ns = { name: sem.name.trim(), startDate: sd, endDate: ed, userId: state.user.id, order: state.semesters.length, createdAt: serverTimestamp() };
+    const ref = doc(collection(db, 'semesters'));
+    await setDoc(ref, ns);
+    const created = { id: ref.id, ...ns };
+    dispatch({ type: 'ADD_SEMESTER', payload: created });
+    return created;
   };
 
-  const logout = async () => {
-    try {
-      console.log("Logging out");
-      await signOut(auth);
-      dispatch({ type: 'LOGOUT' });
-    } catch (err) {
-      console.error('Logout error:', err);
-    }
+  const updateSemester = async (id, data) => {
+    if (!state.user?.id) throw new Error('Not authenticated');
+    await updateDoc(doc(db, 'semesters', id), data);
+    const u = { id, ...data, startDate: toDate(data.startDate), endDate: toDate(data.endDate) };
+    dispatch({ type: 'UPDATE_SEMESTER', payload: u });
+    return u;
   };
 
-  // Semester functions
-  const addSemester = async (semester) => {
-    try {
-      console.log("Adding semester:", semester);
-      
-      // Check if user is authenticated
-      if (!state.user || !state.user.id) {
-        throw new Error('User not authenticated. Please log in and try again.');
-      }
-      
-      // Check if semester data is valid
-      if (!semester || typeof semester !== 'object') {
-        console.error("Invalid semester data type:", typeof semester, semester);
-        throw new Error('Invalid semester data');
-      }
-      
-      // Check if required fields are present
-      if (!semester.name || !semester.startDate || !semester.endDate) {
-        console.error("Missing required fields:", {
-          name: semester.name,
-          startDate: semester.startDate,
-          endDate: semester.endDate
-        });
-        throw new Error('Semester name, start date, and end date are required');
-      }
-      
-      // Check if fields are of the correct type
-      if (typeof semester.name !== 'string' || semester.name.trim() === '') {
-        console.error("Invalid name field:", semester.name);
-        throw new Error('Semester name must be a non-empty string');
-      }
-      
-      console.log("User ID for semester creation:", state.user.id);
-      
-      // Convert dates to Date objects if they're strings
-      let startDate, endDate;
-      
-      if (semester.startDate instanceof Date) {
-        startDate = semester.startDate;
-      } else if (typeof semester.startDate === 'string') {
-        startDate = new Date(semester.startDate);
-      } else {
-        console.error("Invalid start date type:", typeof semester.startDate, semester.startDate);
-        throw new Error('Start date must be a Date object or a date string');
-      }
-      
-      if (semester.endDate instanceof Date) {
-        endDate = semester.endDate;
-      } else if (typeof semester.endDate === 'string') {
-        endDate = new Date(semester.endDate);
-      } else {
-        console.error("Invalid end date type:", typeof semester.endDate, semester.endDate);
-        throw new Error('End date must be a Date object or a date string');
-      }
-      
-      // Validate dates
-      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-        console.error("Invalid date values:", {
-          startDate: startDate,
-          endDate: endDate,
-          startDateValid: !isNaN(startDate.getTime()),
-          endDateValid: !isNaN(endDate.getTime())
-        });
-        throw new Error('Invalid date format');
-      }
-      
-      if (startDate >= endDate) {
-        console.error("Invalid date range:", {
-          startDate: startDate,
-          endDate: endDate,
-          comparison: startDate >= endDate
-        });
-        throw new Error('End date must be after start date');
-      }
-      
-      // Check if a semester with the same name already exists
-      const existingSemester = state.semesters.find(s => 
-        s.name.toLowerCase() === semester.name.toLowerCase()
-      );
-      
-      if (existingSemester) {
-        console.log("Semester with same name already exists:", existingSemester);
-        throw new Error('A semester with this name already exists');
-      }
-      
-      // Calculate order - new semesters get added to the end
-      const order = state.semesters.length;
-      
-      const newSemester = {
-        name: semester.name.trim(),
-        startDate,
-        endDate,
-        userId: state.user.id,
-        order,
-        createdAt: serverTimestamp()
-      };
-      
-      console.log("Creating new semester in Firestore:", newSemester);
-      
-      // Add to Firestore
-      const semesterRef = doc(collection(db, 'semesters'));
-      await setDoc(semesterRef, newSemester);
-      
-      const createdSemester = {
-        id: semesterRef.id,
-        ...newSemester
-      };
-      
-      console.log("Created semester:", createdSemester);
-      
-      // Update the state
-      dispatch({ type: 'ADD_SEMESTER', payload: createdSemester });
-      
-      // Return the created semester
-      return createdSemester;
-    } catch (err) {
-      console.error('Error adding semester:', err);
-      // Re-throw the error to be caught by the caller
-      throw err;
-    }
+  const deleteSemester = async (id) => {
+    if (!state.user?.id) throw new Error('Not authenticated');
+    const ds = await getDocs(query(collection(db, 'days'), where('semesterId', '==', id)));
+    await Promise.all(ds.docs.map(d => deleteDoc(d.ref)));
+    await deleteDoc(doc(db, 'semesters', id));
+    dispatch({ type: 'DELETE_SEMESTER', payload: id });
   };
 
-  const updateSemester = async (semesterId, semesterData) => {
-    try {
-      console.log("Updating semester:", semesterId, semesterData);
-      
-      // Check if user is authenticated
-      if (!state.user || !state.user.id) {
-        throw new Error('User not authenticated. Please log in and try again.');
-      }
-      
-      const semesterRef = doc(db, 'semesters', semesterId);
-      await updateDoc(semesterRef, semesterData);
-      
-      const updatedSemester = {
-        id: semesterId,
-        ...semesterData,
-        startDate: toDate(semesterData.startDate),
-        endDate: toDate(semesterData.endDate)
-      };
-      
-      console.log("Updated semester:", updatedSemester);
-      
-      dispatch({ type: 'UPDATE_SEMESTER', payload: updatedSemester });
-      return updatedSemester;
-    } catch (err) {
-      console.error('Error updating semester:', err);
-      throw err;
-    }
+  const reorderSemesters = async (list) => {
+    if (!state.user?.id) throw new Error('Not authenticated');
+    await Promise.all(list.map((s, i) => updateDoc(doc(db, 'semesters', s.id), { order: i })));
+    dispatch({ type: 'REORDER_SEMESTERS', payload: list });
   };
 
-  const deleteSemester = async (semesterId) => {
-    try {
-      console.log("Deleting semester:", semesterId);
-      
-      // Check if user is authenticated
-      if (!state.user || !state.user.id) {
-        throw new Error('User not authenticated. Please log in and try again.');
-      }
-      
-      // Delete all days associated with this semester
-      const daysQuery = query(collection(db, 'days'), where('semesterId', '==', semesterId));
-      const daysSnapshot = await getDocs(daysQuery);
-      
-      const deletePromises = daysSnapshot.docs.map(doc => deleteDoc(doc.ref));
-      await Promise.all(deletePromises);
-      
-      // Delete the semester
-      await deleteDoc(doc(db, 'semesters', semesterId));
-      
-      console.log("Deleted semester:", semesterId);
-      
-      dispatch({ type: 'DELETE_SEMESTER', payload: semesterId });
-      return true;
-    } catch (err) {
-      console.error('Error deleting semester:', err);
-      throw err;
-    }
-  };
+  const setCurrentSemester = (s) => dispatch({ type: 'SET_CURRENT_SEMESTER', payload: s });
 
-  const reorderSemesters = async (updatedSemesters) => {
-    try {
-      console.log("Reordering semesters");
-      
-      // Check if user is authenticated
-      if (!state.user || !state.user.id) {
-        throw new Error('User not authenticated. Please log in and try again.');
-      }
-      
-      // Update each semester with its new order
-      const updatePromises = updatedSemesters.map((semester, index) => {
-        const semesterRef = doc(db, 'semesters', semester.id);
-        return updateDoc(semesterRef, { order: index });
-      });
-      
-      await Promise.all(updatePromises);
-      
-      dispatch({ type: 'REORDER_SEMESTERS', payload: updatedSemesters });
-      return true;
-    } catch (err) {
-      console.error('Error reordering semesters:', err);
-      throw err;
-    }
-  };
-
-  const setCurrentSemester = (semester) => {
-    console.log("Setting current semester:", semester);
-    dispatch({ type: 'SET_CURRENT_SEMESTER', payload: semester });
-  };
-
-  // Day functions
   const addOrUpdateDay = async (dayData) => {
-    try {
-      // Check if user is authenticated
-      if (!state.user || !state.user.id) {
-        throw new Error('User not authenticated. Please log in and try again.');
-      }
-      
-      const existingDayIndex = state.days.findIndex(
-        day => day.semesterId === dayData.semesterId && 
-               safeFormat(new Date(day.date), 'yyyy-MM-dd') === safeFormat(new Date(dayData.date), 'yyyy-MM-dd')
-      );
-
-      const dayPayload = {
-        ...dayData,
-        userId: state.user.id,
-        date: new Date(dayData.date) // Ensure it's a Date object
-      };
-
-      if (existingDayIndex !== -1) {
-        // Update existing day in Firestore
-        const dayRef = doc(db, 'days', state.days[existingDayIndex].id);
-        await updateDoc(dayRef, dayPayload);
-        
-        const updatedDay = {
-          id: state.days[existingDayIndex].id,
-          ...dayPayload
-        };
-        
-        dispatch({ type: 'UPDATE_DAY', payload: updatedDay });
-        return updatedDay;
-      } else {
-        // Add new day to Firestore
-        const dayRef = doc(collection(db, 'days'));
-        await setDoc(dayRef, dayPayload);
-        
-        const newDay = {
-          id: dayRef.id,
-          ...dayPayload
-        };
-        
-        dispatch({ type: 'ADD_DAY', payload: newDay });
-        return newDay;
-      }
-    } catch (err) {
-      console.error('Error adding/updating day:', err);
-      throw err;
+    if (!state.user?.id) throw new Error('Not authenticated');
+    const idx = state.days.findIndex(d => d.semesterId === dayData.semesterId && safeFormat(new Date(d.date), 'yyyy-MM-dd') === safeFormat(new Date(dayData.date), 'yyyy-MM-dd'));
+    const payload = { ...dayData, userId: state.user.id, date: new Date(dayData.date) };
+    if (idx !== -1) {
+      const ref = doc(db, 'days', state.days[idx].id);
+      await updateDoc(ref, payload);
+      const u = { id: state.days[idx].id, ...payload };
+      dispatch({ type: 'UPDATE_DAY', payload: u });
+      return u;
+    } else {
+      const ref = doc(collection(db, 'days'));
+      await setDoc(ref, payload);
+      const n = { id: ref.id, ...payload };
+      dispatch({ type: 'ADD_DAY', payload: n });
+      return n;
     }
   };
 
-  // Get all days in the current semester
   const getDaysForCurrentSemester = () => {
     if (!state.currentSemester) return [];
-    
-    const startDate = toDate(state.currentSemester.startDate);
-    const endDate = toDate(state.currentSemester.endDate);
-    
-    // Validate dates
-    if (!startDate || !endDate || isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-      console.error('Invalid semester dates:', { startDate, endDate });
-      return [];
-    }
-    
-    const today = new Date();
-    
-    // Get all days for this semester from state
-    const semesterDays = state.days.filter(day => {
-      const dayDate = toDate(day.date);
-      return day.semesterId === state.currentSemester.id && 
-             dayDate && 
-             !isNaN(dayDate.getTime());
-    });
-    
-    // Create array of all days in the semester
+    const sd = toDate(state.currentSemester.startDate);
+    const ed = toDate(state.currentSemester.endDate);
+    if (!sd || !ed || isNaN(sd.getTime()) || isNaN(ed.getTime())) return [];
+    const today = new Date(); today.setHours(23, 59, 59, 999);
+    const semDays = state.days.filter(d => { const dd = toDate(d.date); return d.semesterId === state.currentSemester.id && dd && !isNaN(dd.getTime()); });
     try {
-      const allDays = eachDayOfInterval({ start: startDate, end: endDate }).map(date => {
-        const dateStr = safeFormat(date, 'yyyy-MM-dd');
-        const existingDay = semesterDays.find(day => {
-          const dayDate = toDate(day.date);
-          return dayDate && safeFormat(dayDate, 'yyyy-MM-dd') === dateStr;
-        });
-        
-        // Set Sunday as holiday by default if not explicitly set
-        const isSundayHoliday = isSunday(date) && !existingDay;
-        
-        // Only mark days up to today as working by default, leave future days blank
-        let defaultType = '';
-        let defaultDescription = '';
-        
-        if (isBefore(date, today) || isToday(date)) {
-          defaultType = isSundayHoliday ? 'holiday' : 'working';
-          defaultDescription = isSundayHoliday ? 'Sunday' : '';
+      return eachDayOfInterval({ start: sd, end: ed }).map(date => {
+        const ds = safeFormat(date, 'yyyy-MM-dd');
+        const ex = semDays.find(d => safeFormat(toDate(d.date), 'yyyy-MM-dd') === ds);
+        if (ex) return { date, type: ex.type, description: ex.description, id: ex.id };
+        const isPast = isBefore(date, today) || isToday(date);
+        if (isPast) {
+          if (isSunday(date)) return { date, type: 'holiday', description: 'Sunday', id: null };
+          if (isSecondSaturday(date)) return { date, type: 'holiday', description: '2nd Saturday', id: null };
+          return { date, type: 'working', description: '', id: null };
         }
-        
-        return {
-          date,
-          type: existingDay ? existingDay.type : defaultType,
-          description: existingDay ? existingDay.description : defaultDescription,
-          id: existingDay ? existingDay.id : null
-        };
+        return { date, type: '', description: '', id: null };
       });
-      
-      return allDays;
-    } catch (err) {
-      console.error('Error creating day interval:', err);
-      return [];
-    }
+    } catch { return []; }
   };
 
-  // Get statistics for current semester
   const getSemesterStats = () => {
     const days = getDaysForCurrentSemester();
-    
-    const stats = {
-      total: days.length,
-      working: 0,
-      holiday: 0,
-      event: 0,
-      exam: 0,
-      break: 0
-    };
-    
-    days.forEach(day => {
-      if (day.type) { // Only count days that have a type set
-        stats[day.type]++;
-      }
-    });
-    
-    // Calculate progress
+    const stats = { total: days.length, working: 0, holiday: 0, event: 0, exam: 0, break: 0 };
+    days.forEach(d => { if (d.type && stats[d.type] !== undefined) stats[d.type]++; });
     const today = new Date();
-    const semesterStart = toDate(state.currentSemester?.startDate);
-    const daysPassed = semesterStart ? 
-      differenceInDays(today, semesterStart) + 1 : 0;
-    const progress = stats.total > 0 ? 
-      Math.min(100, Math.round((daysPassed / stats.total) * 100)) : 0;
-    
-    return { ...stats, progress, daysPassed };
+    const ss = toDate(state.currentSemester?.startDate);
+    const dp = ss ? differenceInDays(today, ss) + 1 : 0;
+    const prog = stats.total > 0 ? Math.min(100, Math.round((dp / stats.total) * 100)) : 0;
+    return { ...stats, progress: prog, daysPassed: dp };
+  };
+  // *** SHARE SEMESTER — FIXED ***
+  const shareSemester = async () => {
+    if (!state.user?.id) throw new Error('Not authenticated');
+    if (!state.currentSemester) throw new Error('No semester selected');
+
+    const days = getDaysForCurrentSemester();
+    const stats = getSemesterStats();
+
+    let shareId = state.currentSemester.shareId;
+
+    // Convert days to plain serializable objects
+    const serializedDays = days.map(d => ({
+      date: d.date instanceof Date ? format(d.date, 'yyyy-MM-dd') : String(d.date),
+      type: d.type || '',
+      description: d.description || ''
+    }));
+
+    // Convert dates to ISO strings for consistent storage
+    const startDateStr = state.currentSemester.startDate instanceof Date
+      ? state.currentSemester.startDate.toISOString()
+      : new Date(state.currentSemester.startDate).toISOString();
+
+    const endDateStr = state.currentSemester.endDate instanceof Date
+      ? state.currentSemester.endDate.toISOString()
+      : new Date(state.currentSemester.endDate).toISOString();
+
+    // Clean stats — only plain numbers
+    const cleanStats = {
+      total: stats.total || 0,
+      working: stats.working || 0,
+      holiday: stats.holiday || 0,
+      event: stats.event || 0,
+      exam: stats.exam || 0,
+      break: stats.break || 0
+    };
+
+    const shareData = {
+      semesterName: state.currentSemester.name,
+      startDate: startDateStr,
+      endDate: endDateStr,
+      days: serializedDays,
+      stats: cleanStats,
+      sharedBy: state.user.id,
+      sharedByName: state.user.name || state.user.email || 'Unknown',
+      updatedAt: serverTimestamp()
+    };
+
+    console.log('Sharing semester:', {
+      shareId,
+      semesterName: shareData.semesterName,
+      daysCount: serializedDays.length
+    });
+
+    try {
+      if (shareId) {
+        // Update existing share
+        await setDoc(doc(db, 'sharedSemesters', shareId), shareData);
+        console.log('Updated existing share:', shareId);
+      } else {
+        // Create new share
+        shareId = generateId();
+        shareData.createdAt = serverTimestamp();
+        await setDoc(doc(db, 'sharedSemesters', shareId), shareData);
+        console.log('Created new share:', shareId);
+
+        // Save shareId back to semester
+        await updateDoc(doc(db, 'semesters', state.currentSemester.id), { shareId });
+        dispatch({
+          type: 'UPDATE_SEMESTER',
+          payload: { ...state.currentSemester, shareId }
+        });
+      }
+
+      // Build share URL
+      const url = new URL(window.location.href);
+      url.searchParams.set('share', shareId);
+      // Remove any hash
+      url.hash = '';
+      const shareUrl = url.toString();
+
+      console.log('Share URL:', shareUrl);
+      return shareUrl;
+    } catch (err) {
+      console.error('Error sharing semester:', err);
+      throw err;
+    }
   };
 
   return (
     <AppContext.Provider value={{
-      ...state,
-      login,
-      register,
-      logout,
-      addSemester,
-      updateSemester,
-      deleteSemester,
-      reorderSemesters,
-      setCurrentSemester,
-      addOrUpdateDay,
-      getDaysForCurrentSemester,
-      getSemesterStats
+      ...state, login, register, logout,
+      addSemester, updateSemester, deleteSemester,
+      reorderSemesters, setCurrentSemester,
+      addOrUpdateDay, getDaysForCurrentSemester, getSemesterStats,
+      toggleTheme, shareSemester
     }}>
       {children}
     </AppContext.Provider>
